@@ -1,0 +1,8 @@
+# Binarios compilados
+/status-device
+/status_device
+/bin/
+/dist/
+
+# Salidas de depuración
+*.png
