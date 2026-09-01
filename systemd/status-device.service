@@ -1,10 +1,11 @@
 [Unit]
-Description=Indicador de CPU, GPU y RAM en la barra superior
+Description=Indicador de CPU, GPU y RAM en la barra del escritorio
 Documentation=https://github.com/cesardev31/status_device
 PartOf=graphical-session.target
 After=graphical-session.target
-# El indicador solo tiene sentido con sesión gráfica; si GNOME aún no ha
-# levantado el shell, systemd reintenta unas cuantas veces.
+# El indicador solo tiene sentido con sesión gráfica; si el shell (GNOME Shell
+# o plasmashell) aún no ha levantado la bandeja, el programa la espera y
+# systemd reintenta unas cuantas veces.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -12,10 +13,14 @@ StartLimitBurst=5
 Type=simple
 # Opciones extra sin tocar esta unidad: escribe STATUS_DEVICE_ARGS en
 # ~/.config/status-device/env (por ejemplo: STATUS_DEVICE_ARGS=-warn 60 -crit 85)
+Environment=STATUS_DEVICE_ARGS=
 EnvironmentFile=-%h/.config/status-device/env
 ExecStart=%h/.local/bin/status-device $STATUS_DEVICE_ARGS
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=graphical-session.target
+# graphical-session.target para las sesiones que arrancan con systemd (GNOME y
+# Plasma con «systemd startup»); default.target como respaldo para las sesiones
+# de Plasma que no lo usan y nunca activan ese target.
+WantedBy=graphical-session.target default.target

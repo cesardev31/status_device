@@ -81,6 +81,7 @@ func Rows(s metrics.Snapshot, th alert.Thresholds) []tray.Row {
 		{},
 		header("RAM", ram, th),
 		detail(fmt.Sprintf("%s en uso · %s libres de %s", gib(s.MemUsed), gib(s.MemFree), gib(s.MemTotal))),
+		detail(fmt.Sprintf("Caché del sistema %s · compartida %s", gib(s.MemCache), gib(s.MemShared))),
 	}
 	if s.SwapTotal > 0 {
 		rows = append(rows, detail(fmt.Sprintf("Swap %s · %s libres de %s",
@@ -103,6 +104,7 @@ func Rows(s metrics.Snapshot, th alert.Thresholds) []tray.Row {
 			pct(ratio(s.VRAMUsed, s.VRAMTotal)), gib(s.VRAMUsed), gib(s.VRAMTotal),
 			gib(s.VRAMTotal-s.VRAMUsed))))
 	}
+
 	return rows
 }
 

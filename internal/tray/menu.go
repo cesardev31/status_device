@@ -1,7 +1,6 @@
 package tray
 
 import (
-	"os/exec"
 	"sync"
 
 	"github.com/godbus/dbus/v5"
@@ -29,18 +28,24 @@ type menuEvent struct {
 }
 
 const (
-	idSysMonitor = 100
-	idQuit       = 101
+	idOpenDashboard       = 100
+	idToggleNotifications = 101
+	idQuit                = 102
 )
 
 // Menu implementa com.canonical.dbusmenu: el desplegable que aparece al pulsar
 // el indicador. El contenido se genera al vuelo con la última medición.
 type Menu struct {
-	mu       sync.Mutex
-	revision uint32
-	rows     []Row
+	mu                   sync.Mutex
+	conn                 *dbus.Conn
+	revision             uint32
+	rows                 []Row
+	notificationsEnabled bool
+	open                 bool // el desplegable está abierto ahora mismo
 
-	OnQuit func()
+	OnQuit                func()
+	OnOpen                func()
+	OnToggleNotifications func(bool)
 }
 
 // Row es una fila del desplegable. Texto vacío = separador. Las filas Dim se
@@ -51,7 +56,7 @@ type Row struct {
 }
 
 func NewMenu() *Menu {
-	return &Menu{revision: 1, rows: []Row{{Text: "Recogiendo datos…", Dim: true}}}
+	return &Menu{revision: 1}
 }
 
 // SetRows reemplaza las filas informativas del desplegable.
@@ -60,9 +65,25 @@ func (m *Menu) SetRows(rows []Row) {
 	m.rows = rows
 	m.revision++
 	m.mu.Unlock()
+	m.announceLayout()
+}
+
+// SetNotificationsEnabled actualiza el estado y el texto del interruptor del
+// menú. La preferencia dura hasta que termine el proceso; el flag decide el
+// estado inicial en cada arranque.
+func (m *Menu) SetNotificationsEnabled(enabled bool) {
+	m.mu.Lock()
+	m.notificationsEnabled = enabled
+	m.revision++
+	m.mu.Unlock()
+	m.announceLayout()
 }
 
 func (m *Menu) export(conn *dbus.Conn) error {
+	m.mu.Lock()
+	m.conn = conn
+	m.mu.Unlock()
+
 	spec := map[string]map[string]*prop.Prop{
 		menuIface: {
 			"Version":       ro(uint32(3)),
@@ -85,6 +106,7 @@ func (m *Menu) export(conn *dbus.Conn) error {
 func (m *Menu) items() []menuLayout {
 	m.mu.Lock()
 	rows := append([]Row(nil), m.rows...)
+	notificationsEnabled := m.notificationsEnabled
 	m.mu.Unlock()
 
 	var out []menuLayout
@@ -109,10 +131,19 @@ func (m *Menu) items() []menuLayout {
 		}
 		id++
 	}
+	if len(out) > 0 {
+		out = append(out, menuLayout{ID: 99, Props: map[string]dbus.Variant{
+			"type": dbus.MakeVariant("separator"),
+		}})
+	}
 	out = append(out,
-		menuLayout{ID: 99, Props: map[string]dbus.Variant{"type": dbus.MakeVariant("separator")}},
-		menuLayout{ID: idSysMonitor, Props: map[string]dbus.Variant{
-			"label": dbus.MakeVariant("Abrir monitor del sistema"),
+		menuLayout{ID: idOpenDashboard, Props: map[string]dbus.Variant{
+			"label": dbus.MakeVariant("Abrir administrador de tareas"),
+		}},
+		menuLayout{ID: idToggleNotifications, Props: map[string]dbus.Variant{
+			"label":        dbus.MakeVariant("Notificaciones"),
+			"toggle-type":  dbus.MakeVariant("checkmark"),
+			"toggle-state": dbus.MakeVariant(toggleState(notificationsEnabled)),
 		}},
 		menuLayout{ID: idQuit, Props: map[string]dbus.Variant{
 			"label": dbus.MakeVariant("Salir"),
@@ -166,17 +197,13 @@ func (m *Menu) GetProperty(id int32, name string) (dbus.Variant, *dbus.Error) {
 }
 
 func (m *Menu) Event(id int32, eventID string, data dbus.Variant, timestamp uint32) *dbus.Error {
-	if eventID == "clicked" {
-		m.activate(id)
-	}
+	m.handle(id, eventID)
 	return nil
 }
 
 func (m *Menu) EventGroup(events []menuEvent) ([]int32, *dbus.Error) {
 	for _, e := range events {
-		if e.EventID == "clicked" {
-			m.activate(e.ID)
-		}
+		m.handle(e.ID, e.EventID)
 	}
 	return nil, nil
 }
@@ -191,10 +218,48 @@ func (m *Menu) AboutToShowGroup(ids []int32) ([]int32, []int32, *dbus.Error) {
 	return ids, nil, nil
 }
 
+// handle traduce un evento de dbusmenu. Plasma avisa de «opened»/«closed»;
+// mientras el desplegable está abierto conviene anunciar cada cambio de datos
+// con LayoutUpdated, que es como el importador de Qt se entera.
+func (m *Menu) handle(id int32, eventID string) {
+	switch eventID {
+	case "clicked":
+		m.activate(id)
+	case "opened":
+		m.mu.Lock()
+		m.open = true
+		m.mu.Unlock()
+	case "closed":
+		m.mu.Lock()
+		m.open = false
+		m.mu.Unlock()
+	}
+}
+
+// announceLayout emite LayoutUpdated si el menú está desplegado en pantalla.
+func (m *Menu) announceLayout() {
+	m.mu.Lock()
+	conn, open, rev := m.conn, m.open, m.revision
+	m.mu.Unlock()
+	if conn == nil || !open {
+		return
+	}
+	_ = conn.Emit(menuPath, menuIface+".LayoutUpdated", rev, int32(0))
+}
+
 func (m *Menu) activate(id int32) {
 	switch id {
-	case idSysMonitor:
-		go openSystemMonitor()
+	case idOpenDashboard:
+		m.onActivate()
+	case idToggleNotifications:
+		m.mu.Lock()
+		m.notificationsEnabled = !m.notificationsEnabled
+		enabled := m.notificationsEnabled
+		m.revision++
+		m.mu.Unlock()
+		if m.OnToggleNotifications != nil {
+			m.OnToggleNotifications(enabled)
+		}
 	case idQuit:
 		if m.OnQuit != nil {
 			m.OnQuit()
@@ -202,22 +267,17 @@ func (m *Menu) activate(id int32) {
 	}
 }
 
-// onActivate se llama al hacer clic izquierdo en el icono.
-func (m *Menu) onActivate() {
-	go openSystemMonitor()
+func toggleState(enabled bool) int32 {
+	if enabled {
+		return 1
+	}
+	return 0
 }
 
-func openSystemMonitor() {
-	for _, cmd := range [][]string{
-		{"gnome-system-monitor"},
-		{"missioncenter"},
-		{"gnome-terminal", "--", "top"},
-	} {
-		if _, err := exec.LookPath(cmd[0]); err != nil {
-			continue
-		}
-		_ = exec.Command(cmd[0], cmd[1:]...).Start()
-		return
+// onActivate se llama al hacer clic izquierdo en el icono.
+func (m *Menu) onActivate() {
+	if m.OnOpen != nil {
+		m.OnOpen()
 	}
 }
 

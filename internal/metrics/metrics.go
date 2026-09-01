@@ -17,6 +17,8 @@ type Snapshot struct {
 	MemTotal   uint64 // bytes
 	MemUsed    uint64
 	MemFree    uint64 // disponible de verdad (MemAvailable)
+	MemCache   uint64 // caché del sistema; Linux puede reutilizar buena parte
+	MemShared  uint64
 	SwapTotal  uint64
 	SwapUsed   uint64
 	GPUName    string
@@ -26,6 +28,7 @@ type Snapshot struct {
 	VRAMTotal  uint64
 	VRAMUsed   uint64
 	VRAMOK     bool
+	Processes  []ProcessUsage
 }
 
 // cpuTimes son los contadores acumulados de /proc/stat para una CPU.
@@ -38,6 +41,7 @@ type cpuTimes struct {
 type Collector struct {
 	prevTotal cpuTimes
 	prevCores []cpuTimes
+	processes processCollector
 	gpu       *gpuDevice
 	gpuLooked bool
 }
@@ -45,6 +49,7 @@ type Collector struct {
 func NewCollector() *Collector {
 	c := &Collector{}
 	c.prevTotal, c.prevCores = readCPUTimes()
+	c.processes.seed()
 	return c
 }
 
@@ -55,12 +60,14 @@ func (c *Collector) Read() Snapshot {
 
 	total, cores := readCPUTimes()
 	s.CPUPercent = cpuUsage(c.prevTotal, total)
+	deltaTotal := counterDelta(c.prevTotal.total, total.total)
 	for i := range cores {
 		if i < len(c.prevCores) {
 			s.CPUCores = append(s.CPUCores, cpuUsage(c.prevCores[i], cores[i]))
 		}
 	}
 	c.prevTotal, c.prevCores = total, cores
+	s.Processes = c.processes.read(deltaTotal)
 
 	s.CPUTempC = readCPUTemp()
 	s.LoadAvg = readLoadAvg()
@@ -74,6 +81,13 @@ func (c *Collector) Read() Snapshot {
 		c.gpu.fill(&s)
 	}
 	return s
+}
+
+func counterDelta(prev, cur uint64) uint64 {
+	if cur < prev {
+		return 0
+	}
+	return cur - prev
 }
 
 func cpuUsage(prev, cur cpuTimes) float64 {
@@ -167,6 +181,8 @@ func readMemInfo(s *Snapshot) {
 
 	s.MemTotal = vals["MemTotal"]
 	s.MemFree = vals["MemAvailable"]
+	s.MemCache = vals["Buffers"] + vals["Cached"] + vals["SReclaimable"]
+	s.MemShared = vals["Shmem"]
 	if s.MemFree == 0 {
 		s.MemFree = vals["MemFree"]
 	}

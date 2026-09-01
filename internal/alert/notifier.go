@@ -31,6 +31,11 @@ func NewNotifier(conn *dbus.Conn, sustain, cooldown time.Duration) *Notifier {
 	}
 }
 
+// Reset olvida estados críticos pendientes al desactivar las notificaciones.
+func (n *Notifier) Reset() {
+	n.states = map[string]*state{}
+}
+
 // Check evalúa una métrica y avisa si procede. `key` identifica la métrica
 // entre llamadas; `summary` y `body` son el título y el cuerpo del aviso.
 func (n *Notifier) Check(key string, level Level, summary, body string) {

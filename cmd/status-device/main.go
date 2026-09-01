@@ -1,8 +1,9 @@
-// Comando status-device: muestra el uso de CPU, GPU y RAM en la barra superior
-// de Ubuntu (GNOME Shell) como un indicador de estado.
+// Comando status-device: muestra el uso de CPU, GPU y RAM en la barra del
+// escritorio (GNOME Shell o KDE Plasma) como un indicador de estado.
 //
 // No usa cgo ni bibliotecas de sistema: habla D-Bus directamente y publica un
-// StatusNotifierItem que la extensión «Ubuntu AppIndicators» dibuja en la barra.
+// StatusNotifierItem, que en GNOME dibuja la extensión «Ubuntu AppIndicators» y
+// en Plasma la bandeja del sistema nativa.
 package main
 
 import (
@@ -28,14 +29,23 @@ func main() {
 		"nombre de icono del tema; vacío = barras de color dibujadas por el programa")
 	warn := flag.Float64("warn", 75, "porcentaje a partir del cual una métrica se pinta en ámbar")
 	crit := flag.Float64("crit", 90, "porcentaje a partir del cual se pinta en rojo y se avisa")
-	notify := flag.Bool("notify", true, "enviar una notificación cuando algo se mantiene en rojo")
+	notify := flag.Bool("notify", false, "enviar una notificación cuando algo se mantiene en rojo")
 	sustain := flag.Duration("notify-after", 15*time.Second,
 		"tiempo que debe mantenerse en rojo antes de notificar")
 	cooldown := flag.Duration("notify-every", 5*time.Minute,
 		"espera mínima entre notificaciones de la misma métrica")
 	once := flag.Bool("once", false, "imprime una medición por stdout y termina (sin indicador)")
 	dumpIcon := flag.String("dump-icon", "", "depuración: guarda el icono actual como PNG y termina")
+	window := flag.Bool("window", false, "abre la ventana gráfica del administrador de tareas y termina")
 	flag.Parse()
+	dashboardPath := dashboardSnapshotPath()
+	if *window {
+		if err := launchDashboard(dashboardPath); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *interval < 200*time.Millisecond {
 		*interval = 200 * time.Millisecond
@@ -44,7 +54,6 @@ func main() {
 	if th.Crit < th.Warn {
 		th.Crit = th.Warn
 	}
-
 	col := metrics.NewCollector()
 
 	if *dumpIcon != "" {
@@ -67,6 +76,14 @@ func main() {
 	}
 
 	menu := tray.NewMenu()
+	menu.SetNotificationsEnabled(*notify)
+	menu.OnOpen = func() {
+		go func() {
+			if err := launchDashboard(dashboardPath); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+			}
+		}()
+	}
 	ind, err := tray.NewIndicator(*iconName, "status_device", menu)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -74,9 +91,31 @@ func main() {
 	}
 	defer ind.Close()
 
-	var notifier *alert.Notifier
-	if *notify {
-		notifier = alert.NewNotifier(ind.Conn(), *sustain, *cooldown)
+	if !tray.CurrentDesktop().SupportsLabel() {
+		// Plasma implementa StatusNotifierItem pero no la extensión de Ayatana
+		// que pinta texto junto al icono; conviene decirlo una vez en el
+		// registro para que nadie lo tome por un fallo.
+		fmt.Fprintln(os.Stderr, "aviso: este escritorio no muestra texto junto al icono; "+
+			"las cifras se ven en las barras del icono, en el tooltip y en el menú")
+	}
+
+	notifier := alert.NewNotifier(ind.Conn(), *sustain, *cooldown)
+	notificationsEnabled := *notify
+	notifyChanged := make(chan bool, 1)
+	menu.OnToggleNotifications = func(enabled bool) {
+		select {
+		case notifyChanged <- enabled:
+		default:
+			// Si hay un clic pendiente, conservar el estado más reciente.
+			select {
+			case <-notifyChanged:
+			default:
+			}
+			select {
+			case notifyChanged <- enabled:
+			default:
+			}
+		}
 	}
 
 	done := make(chan struct{})
@@ -93,11 +132,19 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
 	lastIcon := ""
+	snapshotErrorLogged := false
 	refresh := func() {
 		s := col.Read()
 		rows := Rows(s, th)
-		menu.SetRows(rows)
 		ind.SetLabel(Label(*format, s, th), Tooltip(rows))
+		if err := writeDashboardSnapshot(dashboardPath, s); err != nil {
+			if !snapshotErrorLogged {
+				fmt.Fprintln(os.Stderr, "error guardando datos de la ventana:", err)
+				snapshotErrorLogged = true
+			}
+		} else {
+			snapshotErrorLogged = false
+		}
 		if *iconName == "" {
 			// Redibujar solo si cambia algo visible: el mapa de bits viaja por
 			// D-Bus y no tiene sentido reenviarlo si se ve igual.
@@ -107,7 +154,7 @@ func main() {
 				ind.SetIcon(icon.Build(bars))
 			}
 		}
-		if notifier != nil {
+		if notificationsEnabled {
 			raiseAlerts(notifier, s, th)
 		}
 	}
@@ -123,6 +170,10 @@ func main() {
 			return
 		case <-done:
 			return
+		case notificationsEnabled = <-notifyChanged:
+			if !notificationsEnabled {
+				notifier.Reset()
+			}
 		}
 	}
 }
