@@ -14,9 +14,22 @@ info() { printf '  %s\n' "$*"; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*"; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
+# Un paquete de release trae el binario ya compilado junto a este script; el
+# repositorio, en cambio, trae el código y hace falta Go para construirlo.
+PREBUILT="$REPO_DIR/status-device"
+if [ -x "$PREBUILT" ] && [ ! -d "$REPO_DIR/cmd" ]; then
+  FROM_SOURCE=0
+else
+  FROM_SOURCE=1
+fi
+
 bold "==> Comprobaciones"
-command -v go >/dev/null || die "hace falta Go. Instálalo con: sudo apt install golang-go"
-info "go $(go version | awk '{print $3}' | sed 's/^go//')"
+if [ "$FROM_SOURCE" = 1 ]; then
+  command -v go >/dev/null || die "hace falta Go. Instálalo con: sudo apt install golang-go"
+  info "go $(go version | awk '{print $3}' | sed 's/^go//')"
+else
+  info "paquete precompilado: $("$PREBUILT" -version 2>/dev/null || echo status-device)"
+fi
 
 command -v systemctl >/dev/null || die "systemd no está disponible en este sistema"
 
@@ -73,9 +86,13 @@ else
   warn "python3 no está instalado; el indicador funciona, pero la ventana no abrirá."
 fi
 
-bold "==> Compilando"
+bold "==> Instalando el programa"
 mkdir -p "$BIN_DIR"
-go build -trimpath -ldflags "-s -w" -o "$BIN_DIR/status-device" "$REPO_DIR/cmd/status-device"
+if [ "$FROM_SOURCE" = 1 ]; then
+  go build -trimpath -ldflags "-s -w" -o "$BIN_DIR/status-device" "$REPO_DIR/cmd/status-device"
+else
+  install -m 755 "$PREBUILT" "$BIN_DIR/status-device"
+fi
 info "binario en $BIN_DIR/status-device"
 
 mkdir -p "$LIB_DIR"

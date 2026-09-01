@@ -20,6 +20,10 @@ import (
 	"github.com/cesardev31/status_device/internal/tray"
 )
 
+// version la fija el script de publicación con -ldflags. Compilado a mano se
+// queda en «dev», que es exactamente lo que es.
+var version = "dev"
+
 func main() {
 	interval := flag.Duration("interval", 2*time.Second, "cada cuánto se refrescan los datos")
 	format := flag.String("format", defaultFormat,
@@ -37,7 +41,12 @@ func main() {
 	once := flag.Bool("once", false, "imprime una medición por stdout y termina (sin indicador)")
 	dumpIcon := flag.String("dump-icon", "", "depuración: guarda el icono actual como PNG y termina")
 	window := flag.Bool("window", false, "abre la ventana gráfica del administrador de tareas y termina")
+	showVersion := flag.Bool("version", false, "imprime la versión y termina")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("status-device", version)
+		return
+	}
 	dashboardPath := dashboardSnapshotPath()
 	if *window {
 		if err := launchDashboard(dashboardPath); err != nil {

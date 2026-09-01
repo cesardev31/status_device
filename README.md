@@ -31,17 +31,28 @@ memoria es reutilizable y no significa por sí sola que haya una fuga.
 
 ## Instalación
 
+Desde una versión publicada, sin necesidad de Go:
+
+```bash
+curl -L https://github.com/cesardev31/status_device/releases/latest/download/status-device-v0.1.0-linux-amd64.tar.gz | tar xz
+cd status-device-v0.1.0-linux-amd64
+./scripts/install.sh
+```
+
+O desde el código, que es lo mismo compilando aquí:
+
 ```bash
 git clone https://github.com/cesardev31/status_device.git
 cd status_device
 ./scripts/install.sh
 ```
 
-El script compila el binario en `~/.local/bin/status-device`, instala el
-servicio de usuario de systemd y lo arranca. A partir de ahí el indicador
-aparece solo al iniciar sesión, sin tener que levantarlo a mano.
+El script deja el binario en `~/.local/bin/status-device`, instala el servicio
+de usuario de systemd y lo arranca. A partir de ahí el indicador aparece solo
+al iniciar sesión, sin tener que levantarlo a mano.
 
-Requisitos: Go (`sudo apt install golang-go`), Python 3 con GTK 4/libadwaita,
+Requisitos: Go solo si se instala desde el código (`sudo apt install
+golang-go`), Python 3 con GTK 4/libadwaita,
 una bandeja del sistema compatible con StatusNotifierItem (GNOME Shell con la
 extensión de appindicators, o KDE Plasma sin más) y Linux (lee `/proc` y
 `/sys`). Ubuntu con GNOME ya suele incluir las dependencias de la ventana.
@@ -141,6 +152,17 @@ color `{cpu_dot}` `{gpu_dot}` `{ram_dot}`.
 ```bash
 ./status-device -format '{cpu_dot}{cpu} {gpu_dot}{gpu} {ram_dot}{ram}'  # puntos siempre
 ./status-device -format '{cpu} {gpu} {ram}' -interval 1s                # compacto
+```
+
+## Publicar una versión
+
+Las versiones se construyen y se suben desde aquí, sin acciones en el
+servidor: `scripts/release.sh` comprueba que el árbol esté limpio y al día,
+pasa las pruebas, compila para amd64 y arm64, empaqueta cada uno con la
+ventana y el servicio, y crea la release con `gh`.
+
+```bash
+scripts/release.sh v0.2.0
 ```
 
 ## Estructura
