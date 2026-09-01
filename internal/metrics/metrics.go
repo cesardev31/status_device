@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Snapshot es la foto de los recursos del equipo en un instante.
@@ -21,6 +22,8 @@ type Snapshot struct {
 	MemShared  uint64
 	SwapTotal  uint64
 	SwapUsed   uint64
+	// Los campos GPU* y VRAM* describen la tarjeta principal, que es la que
+	// cabe en la barra del escritorio; GPUs las lleva todas.
 	GPUName    string
 	GPUOK      bool
 	GPUPercent float64
@@ -28,7 +31,18 @@ type Snapshot struct {
 	VRAMTotal  uint64
 	VRAMUsed   uint64
 	VRAMOK     bool
+	VRAMShared bool // la memoria es RAM del sistema, no VRAM dedicada
+	GPUs       []GPU
 	Processes  []ProcessUsage
+	Disks      []DiskIO
+	Mounts     []Mount
+	Nets       []NetIO
+	DiskRead   uint64 // bytes/s sumando todos los discos
+	DiskWrite  uint64
+	NetRX      uint64 // bytes/s sumando todas las interfaces
+	NetTX      uint64
+	Uptime     float64 // segundos desde el arranque
+	Battery    Battery
 }
 
 // cpuTimes son los contadores acumulados de /proc/stat para una CPU.
@@ -42,14 +56,25 @@ type Collector struct {
 	prevTotal cpuTimes
 	prevCores []cpuTimes
 	processes processCollector
-	gpu       *gpuDevice
+	prevDisks map[string]ioCounter
+	prevNets  map[string]ioCounter
+	lastRead  time.Time
+	gpus      []*gpuDevice
 	gpuLooked bool
+	// Solo se rastrean los clientes DRM si alguna tarjeta necesita que se le
+	// deduzca la ocupación: recorrer los descriptores de todo el equipo no es
+	// gratis y las tarjetas AMD y NVIDIA ya dan el dato hecho.
+	needClients bool
+	prevClients map[drmClientKey]clientEngines
 }
 
 func NewCollector() *Collector {
 	c := &Collector{}
 	c.prevTotal, c.prevCores = readCPUTimes()
 	c.processes.seed()
+	c.prevDisks = readDiskStats()
+	c.prevNets = readNetCounters()
+	c.lastRead = time.Now()
 	return c
 }
 
@@ -57,6 +82,10 @@ func NewCollector() *Collector {
 // así que la primera llamada tras crear el Collector da valores poco fiables.
 func (c *Collector) Read() Snapshot {
 	var s Snapshot
+
+	now := time.Now()
+	elapsed := now.Sub(c.lastRead).Seconds()
+	c.lastRead = now
 
 	total, cores := readCPUTimes()
 	s.CPUPercent = cpuUsage(c.prevTotal, total)
@@ -67,20 +96,91 @@ func (c *Collector) Read() Snapshot {
 		}
 	}
 	c.prevTotal, c.prevCores = total, cores
-	s.Processes = c.processes.read(deltaTotal)
+	s.Processes = c.processes.read(deltaTotal, elapsed)
 
 	s.CPUTempC = readCPUTemp()
 	s.LoadAvg = readLoadAvg()
 	readMemInfo(&s)
 
-	if !c.gpuLooked {
-		c.gpu = detectGPU()
-		c.gpuLooked = true
+	disks := readDiskStats()
+	s.Disks = diskRates(c.prevDisks, disks, elapsed)
+	c.prevDisks = disks
+	for _, d := range s.Disks {
+		s.DiskRead += d.ReadRate
+		s.DiskWrite += d.WriteRate
 	}
-	if c.gpu != nil {
-		c.gpu.fill(&s)
+	nets := readNetCounters()
+	s.Nets = netRates(c.prevNets, nets, elapsed)
+	c.prevNets = nets
+	for _, n := range s.Nets {
+		s.NetRX += n.RXRate
+		s.NetTX += n.TXRate
 	}
+	s.Mounts = readMounts()
+	s.Uptime = readUptime()
+	s.Battery = readBattery()
+
+	c.readGPUs(&s, elapsed)
 	return s
+}
+
+// readGPUs mide todas las tarjetas del equipo y resume la principal en los
+// campos sueltos que consumen la barra y el icono.
+func (c *Collector) readGPUs(s *Snapshot, elapsed float64) {
+	if !c.gpuLooked {
+		c.gpus = detectGPUs()
+		c.gpuLooked = true
+		for _, g := range c.gpus {
+			if g.busyFromClients && !g.nvidia {
+				c.needClients = true
+			}
+		}
+		if c.needClients {
+			c.prevClients = readDRMClients("/proc")
+		}
+	}
+	var busy map[string]clientEngines
+	if c.needClients {
+		clients := readDRMClients("/proc")
+		busy = drmBusy(c.prevClients, clients)
+		c.prevClients = clients
+	}
+	for _, g := range c.gpus {
+		s.GPUs = append(s.GPUs, g.fill(busy, elapsed))
+	}
+
+	primary, ok := primaryGPU(s.GPUs)
+	if !ok {
+		return
+	}
+	s.GPUName = primary.Name
+	s.GPUOK = primary.BusyOK
+	s.GPUPercent = primary.BusyPercent
+	s.GPUTempC = primary.TempC
+	s.VRAMTotal, s.VRAMUsed = primary.MemTotal, primary.MemUsed
+	s.VRAMOK, s.VRAMShared = primary.MemOK, primary.MemShared
+}
+
+// primaryGPU elige qué tarjeta representa al equipo. Con una dedicada delante,
+// es la que hace el trabajo pesado y la que interesa vigilar; si solo hay
+// integrada, es esa.
+func primaryGPU(gpus []GPU) (GPU, bool) {
+	if len(gpus) == 0 {
+		return GPU{}, false
+	}
+	best, found := GPU{}, false
+	for _, g := range gpus {
+		if !g.BusyOK {
+			continue
+		}
+		if !found || (best.Integrated && !g.Integrated) {
+			best, found = g, true
+		}
+	}
+	if found {
+		return best, true
+	}
+	return gpus[0], true
 }
 
 func counterDelta(prev, cur uint64) uint64 {

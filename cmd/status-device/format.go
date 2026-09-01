@@ -89,23 +89,57 @@ func Rows(s metrics.Snapshot, th alert.Thresholds) []tray.Row {
 	}
 	rows = append(rows, tray.Row{})
 
-	if s.GPUOK {
-		rows = append(rows, header("GPU", s.GPUPercent, th))
-		gpuDetail := s.GPUName
-		if s.GPUTempC > 0 {
-			gpuDetail += " · " + temp(s.GPUTempC)
-		}
-		rows = append(rows, detail(gpuDetail))
-	} else {
-		rows = append(rows, tray.Row{Text: "⚪  GPU sin datos disponibles"})
-	}
-	if s.VRAMOK {
-		rows = append(rows, detail(fmt.Sprintf("VRAM %s · %s de %s · %s libres",
-			pct(ratio(s.VRAMUsed, s.VRAMTotal)), gib(s.VRAMUsed), gib(s.VRAMTotal),
-			gib(s.VRAMTotal-s.VRAMUsed))))
-	}
+	rows = append(rows, gpuRows(s, th)...)
 
 	return rows
+}
+
+// gpuRows arma una entrada por tarjeta. En un portátil híbrido hay dos, y cada
+// una se numera para saber cuál está trabajando.
+func gpuRows(s metrics.Snapshot, th alert.Thresholds) []tray.Row {
+	if len(s.GPUs) == 0 {
+		return []tray.Row{{Text: "⚪  GPU sin datos disponibles"}}
+	}
+	var rows []tray.Row
+	for i, g := range s.GPUs {
+		name := "GPU"
+		if len(s.GPUs) > 1 {
+			name = fmt.Sprintf("GPU %d", i+1)
+		}
+		if g.BusyOK {
+			rows = append(rows, header(name, g.BusyPercent, th))
+		} else {
+			rows = append(rows, tray.Row{Text: "⚪  " + name + " sin datos de ocupación"})
+		}
+		line := g.Name + " · " + gpuKind(g)
+		if g.TempC > 0 {
+			line += " · " + temp(g.TempC)
+		}
+		if g.PowerW > 0 {
+			line += fmt.Sprintf(" · %.1f W", g.PowerW)
+		}
+		rows = append(rows, detail(line))
+		if g.MemOK {
+			// En una integrada la memoria sale de la RAM del equipo, así que
+			// llamarla VRAM sería mentir sobre de dónde se está gastando.
+			label := "VRAM"
+			if g.MemShared {
+				label = "Memoria compartida"
+			}
+			rows = append(rows, detail(fmt.Sprintf("%s %s · %s de %s · %s libres",
+				label, pct(ratio(g.MemUsed, g.MemTotal)), gib(g.MemUsed), gib(g.MemTotal),
+				gib(g.MemTotal-g.MemUsed))))
+		}
+	}
+	return rows
+}
+
+// gpuKind traduce el tipo de tarjeta a la palabra que usaría cualquiera.
+func gpuKind(g metrics.GPU) string {
+	if g.Integrated {
+		return "integrada"
+	}
+	return "dedicada"
 }
 
 // Tooltip aplana las filas para el globo de ayuda del indicador.

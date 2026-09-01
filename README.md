@@ -165,13 +165,20 @@ systemd/               unidad de usuario
 - **Procesos**: `/proc/<pid>/stat`, `statm` y `exe`; la CPU se mide entre dos
   muestras y la RAM RSS se agrupa por ejecutable. RSS es una aproximación y
   puede contar páginas compartidas en más de una aplicación.
-- **GPU**: `/sys/class/drm/card*/device/gpu_busy_percent` y `mem_info_vram_*`
-  (amdgpu, i915). Si no existen, se consulta `nvidia-smi`. Si tampoco está, la
-  fila de GPU muestra «sin datos».
+- **GPU**: se detectan todas las tarjetas de `/sys/class/drm/card*`, integradas
+  y dedicadas, y un portátil híbrido enseña las dos. La ocupación sale de
+  `gpu_busy_percent` (amdgpu) o, cuando el controlador no la publica (i915, xe),
+  del tiempo de motor que declara cada cliente en `/proc/<pid>/fdinfo`. Las
+  NVIDIA con el controlador propietario se consultan con `nvidia-smi`. El nombre
+  comercial se busca en `pci.ids`, y la temperatura, el consumo y la frecuencia
+  en el `hwmon` de la propia tarjeta.
 
-En APUs AMD la VRAM que se reporta es solo el bloque reservado (medio giga
-típicamente), no la memoria del sistema que la GPU toma prestada por GTT; por
-eso ese porcentaje suele verse alto sin que sea un problema.
+Integrada o dedicada se deduce del controlador y del tamaño de la memoria
+propia: un APU reserva medio giga y ninguna tarjeta dedicada actual baja de dos.
+La distinción importa porque cambia qué memoria se enseña: en una dedicada, su
+VRAM; en una integrada, la memoria del sistema que toma prestada por GTT, porque
+el bloque reservado va siempre casi lleno y enseñarlo haría pensar que la
+tarjeta está al límite.
 
 ## Si no aparece nada en la barra
 

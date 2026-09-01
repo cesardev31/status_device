@@ -133,11 +133,13 @@ func main() {
 
 	lastIcon := ""
 	snapshotErrorLogged := false
+	var history dashboardHistory
 	refresh := func() {
 		s := col.Read()
 		rows := Rows(s, th)
 		ind.SetLabel(Label(*format, s, th), Tooltip(rows))
-		if err := writeDashboardSnapshot(dashboardPath, s); err != nil {
+		history.push(s)
+		if err := writeDashboardSnapshot(dashboardPath, s, history, *interval); err != nil {
 			if !snapshotErrorLogged {
 				fmt.Fprintln(os.Stderr, "error guardando datos de la ventana:", err)
 				snapshotErrorLogged = true

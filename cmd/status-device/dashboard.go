@@ -15,6 +15,41 @@ import (
 
 const dashboardScriptName = "status-device-window.py"
 
+// snapshotVersion sube cuando cambia la forma del JSON. La ventana lo compara
+// para avisar en vez de romperse contra un servicio antiguo.
+const snapshotVersion = 3
+
+// historyLength son las muestras que el servicio guarda de cada métrica. Con el
+// intervalo por defecto son dos minutos de historial, y así las gráficas de la
+// ventana ya aparecen pobladas al abrirla.
+const historyLength = 60
+
+// dashboardHistory es un búfer circular por métrica. Vive en el servicio para
+// que el historial sobreviva a cerrar y volver a abrir la ventana.
+type dashboardHistory struct {
+	CPU    []float64 `json:"cpu"`
+	Memory []float64 `json:"memory"`
+	GPU    []float64 `json:"gpu"`
+}
+
+func (h *dashboardHistory) push(s metrics.Snapshot) {
+	h.CPU = appendSample(h.CPU, s.CPUPercent)
+	h.Memory = appendSample(h.Memory, ratio(s.MemUsed, s.MemTotal))
+	gpu := s.GPUPercent
+	if !s.GPUOK {
+		gpu = 0
+	}
+	h.GPU = appendSample(h.GPU, gpu)
+}
+
+func appendSample(samples []float64, value float64) []float64 {
+	samples = append(samples, metrics.Clamp(value))
+	if len(samples) > historyLength {
+		samples = samples[len(samples)-historyLength:]
+	}
+	return samples
+}
+
 type dashboardSnapshot struct {
 	Version    int                    `json:"version"`
 	UpdatedAt  string                 `json:"updated_at"`
@@ -36,12 +71,27 @@ type dashboardSnapshot struct {
 	VRAMTotal  uint64                 `json:"vram_total"`
 	VRAMUsed   uint64                 `json:"vram_used"`
 	VRAMOK     bool                   `json:"vram_ok"`
+	VRAMShared bool                   `json:"vram_shared"`
+	GPUs       []metrics.GPU          `json:"gpus"`
 	Processes  []metrics.ProcessUsage `json:"processes"`
+	Disks      []metrics.DiskIO       `json:"disks"`
+	Mounts     []metrics.Mount        `json:"mounts"`
+	Nets       []metrics.NetIO        `json:"nets"`
+	DiskRead   uint64                 `json:"disk_read"`
+	DiskWrite  uint64                 `json:"disk_write"`
+	NetRX      uint64                 `json:"net_rx"`
+	NetTX      uint64                 `json:"net_tx"`
+	Uptime     float64                `json:"uptime"`
+	Battery    metrics.Battery        `json:"battery"`
+	BootTime   float64                `json:"boot_time"`   // epoch en segundos
+	ClockTicks float64                `json:"clock_ticks"` // ticks por segundo de /proc
+	Interval   float64                `json:"interval"`    // cada cuánto refresca el servicio
+	History    dashboardHistory       `json:"history"`
 }
 
-func newDashboardSnapshot(s metrics.Snapshot) dashboardSnapshot {
+func newDashboardSnapshot(s metrics.Snapshot, history dashboardHistory, interval time.Duration) dashboardSnapshot {
 	return dashboardSnapshot{
-		Version:    1,
+		Version:    snapshotVersion,
 		UpdatedAt:  time.Now().Format(time.RFC3339Nano),
 		CPUPercent: s.CPUPercent,
 		CPUCores:   s.CPUCores,
@@ -61,9 +111,29 @@ func newDashboardSnapshot(s metrics.Snapshot) dashboardSnapshot {
 		VRAMTotal:  s.VRAMTotal,
 		VRAMUsed:   s.VRAMUsed,
 		VRAMOK:     s.VRAMOK,
+		VRAMShared: s.VRAMShared,
+		GPUs:       s.GPUs,
 		Processes:  s.Processes,
+		Disks:      s.Disks,
+		Mounts:     s.Mounts,
+		Nets:       s.Nets,
+		DiskRead:   s.DiskRead,
+		DiskWrite:  s.DiskWrite,
+		NetRX:      s.NetRX,
+		NetTX:      s.NetTX,
+		Uptime:     s.Uptime,
+		Battery:    s.Battery,
+		BootTime:   float64(time.Now().Unix()) - s.Uptime,
+		ClockTicks: clockTicks,
+		Interval:   interval.Seconds(),
+		History:    history,
 	}
 }
+
+// clockTicks es el USER_HZ del núcleo. Linux lo fija en 100 en todas las
+// arquitecturas que soporta este programa, y sin cgo no hay forma de
+// preguntarlo, así que se declara aquí en un sitio único.
+const clockTicks = 100
 
 func dashboardSnapshotPath() string {
 	base := os.Getenv("XDG_RUNTIME_DIR")
@@ -73,8 +143,8 @@ func dashboardSnapshotPath() string {
 	return filepath.Join(base, "status-device", "snapshot.json")
 }
 
-func writeDashboardSnapshot(path string, s metrics.Snapshot) error {
-	data, err := json.Marshal(newDashboardSnapshot(s))
+func writeDashboardSnapshot(path string, s metrics.Snapshot, history dashboardHistory, interval time.Duration) error {
+	data, err := json.Marshal(newDashboardSnapshot(s, history, interval))
 	if err != nil {
 		return err
 	}

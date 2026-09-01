@@ -6,3 +6,6 @@
 
 # Salidas de depuración
 *.png
+
+# Caché de Python
+__pycache__/
